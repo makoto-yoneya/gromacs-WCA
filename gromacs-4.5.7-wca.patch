@@ -1,0 +1,105 @@
+diff -ur gromacs-4.5.7/include/types/forcerec.h gromacs-4.5.7-wca/include/types/forcerec.h
+--- gromacs-4.5.7/include/types/forcerec.h	2013-04-19 18:25:09.000000000 +0900
++++ gromacs-4.5.7-wca/include/types/forcerec.h	2014-02-07 09:50:37.000000000 +0900
+@@ -366,6 +366,9 @@
+   real userreal2;
+   real userreal3;
+   real userreal4;
++
++  /* Weeks-Chandler-Andersen (WCA) potential */
++  int  iWCA;
+ } t_forcerec;
+ 
+ #define C6(nbfp,ntp,ai,aj)     (nbfp)[2*((ntp)*(ai)+(aj))]
+diff -ur gromacs-4.5.7/src/gmxlib/nonbonded/nb_generic.c gromacs-4.5.7-wca/src/gmxlib/nonbonded/nb_generic.c
+--- gromacs-4.5.7/src/gmxlib/nonbonded/nb_generic.c	2013-04-19 18:25:02.000000000 +0900
++++ gromacs-4.5.7-wca/src/gmxlib/nonbonded/nb_generic.c	2014-02-07 09:49:21.000000000 +0900
+@@ -1,4 +1,5 @@
+ /*
++ * $Id$
+  * 
+  *                This source code is part of
+  * 
+@@ -75,6 +76,8 @@
+     real          jx,jy,jz;
+     real          dx,dy,dz,rsq,rinv;
+     real          c6,c12,cexp1,cexp2,br;
++    int           factor, iwca;
++    real          tc12c6;
+ 	real *        charge;
+ 	real *        shiftvec;
+ 	real *        vdwparam;
+@@ -101,6 +104,7 @@
+ 	shiftvec            = fr->shift_vec[0];
+ 	vdwparam            = fr->nbfp;
+ 	ntype               = fr->ntype;
++	iwca                = 1-2*fr->iWCA;
+ 	
+ 	for(n=0; (n<nlist->nri); n++)
+     {
+@@ -200,8 +204,22 @@
+ 			{
+ 				tj               = nti+nvdwparam*type[jnr];
+ 				
+-				switch(ivdw)
++				switch(iwca*ivdw)
+ 				{
++					case -1:
++						/* Weeks-Chandler-Andersen (WCA) */
++						c6               = vdwparam[tj];   
++						c12              = vdwparam[tj+1]; 
++						
++						rinvsix          = rinvsq*rinvsq*rinvsq;
++						Vvdw_disp        = c6*rinvsix;     
++						Vvdw_rep         = c12*rinvsix*rinvsix;
++						tc12c6           = 2.0*c12/c6; 
++						factor           = ceil(floor(tc12c6*rinvsix)/(tc12c6*rinvsix));
++						fscal           += factor*(12.0*Vvdw_rep-6.0*Vvdw_disp)*rinvsq;
++						Vvdwtot          = Vvdwtot+factor*(Vvdw_rep-Vvdw_disp+0.5*c6/tc12c6);
++						break;
++						
+ 					case 1:
+ 						/* Vanilla Lennard-Jones cutoff */
+ 						c6               = vdwparam[tj];   
+@@ -257,7 +275,7 @@
+ 						break;
+ 												
+ 					default:
+-						gmx_fatal(FARGS,"Death & horror! No generic VdW interaction for ivdw=%d.\n",ivdw);
++						gmx_fatal(FARGS,"Death & horror! No generic VdW interaction for iwca*ivdw=%d.\n",iwca*ivdw);
+ 						break;
+ 				}
+ 			} /* end VdW interactions */
+Only in gromacs-4.5.7-wca/src/mdlib: .forcerec.c.swp
+diff -ur gromacs-4.5.7/src/mdlib/forcerec.c gromacs-4.5.7-wca/src/mdlib/forcerec.c
+--- gromacs-4.5.7/src/mdlib/forcerec.c	2013-04-19 18:25:00.000000000 +0900
++++ gromacs-4.5.7-wca/src/mdlib/forcerec.c	2014-02-07 09:52:17.000000000 +0900
+@@ -1375,6 +1375,20 @@
+         bNoSolvOpt         = TRUE;
+     }
+     
++    fr->iWCA = 0;
++    if (getenv("GMX_NB_GENERIC_WCA") != NULL)
++    {
++        if (fp != NULL)
++        {
++            fprintf(fp,
++                    "Found environment variable GMX_NB_GENERIC_WCA.\n"
++                    "Enabling Weeks-Chandler-Andersen nonbonded potential.\n\n");
++        }
++        fr->iWCA = 1;
++        bGenericKernelOnly = TRUE;
++        bNoSolvOpt         = TRUE;
++    }
++
+     fr->UseOptimizedKernels = (getenv("GMX_NOOPTIMIZEDKERNELS") == NULL);
+     if(fp && fr->UseOptimizedKernels==FALSE)
+     {
+@@ -1777,6 +1791,7 @@
+     fr->t_fnbf=0.;
+     fr->t_wait=0.;
+     fr->timesteps=0;
++    fr->timesteps=0;
+     
+     /* Initialize neighbor search */
+     init_ns(fp,cr,&fr->ns,fr,mtop,box);
